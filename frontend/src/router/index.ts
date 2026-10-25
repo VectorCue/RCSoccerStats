@@ -4,6 +4,18 @@ const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
   routes: [
     {
+      path: '/v2/matches',
+      name: 'v2-matches',
+      component: () => import('@/views/V2TournamentView.vue'),
+      props: { view: 'matches' },
+    },
+    {
+      path: '/v2/standings',
+      name: 'v2-standings',
+      component: () => import('@/views/V2TournamentView.vue'),
+      props: { view: 'standings' },
+    },
+    {
       path: '/',
       name: 'home',
       component: () => import('@/views/HomeView.vue'),
@@ -16,13 +28,13 @@ const router = createRouter({
     {
       path: '/matches',
       name: 'matches',
-      component: () => import('@/views/MatchesView.vue')
+      component: () => import('@/views/MatchesView.vue'),
     },
     {
       path: '/referee',
       name: 'referee',
-      component: () => import('@/views/RefereeView.vue')
-    }
+      component: () => import('@/views/RefereeView.vue'),
+    },
   ],
 })
 

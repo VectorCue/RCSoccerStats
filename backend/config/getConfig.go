@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -17,6 +18,9 @@ func GetConfig() *Config {
 	cfg.Port = 3030
 	cfg.Host = "0.0.0.0"
 	cfg.URL = "https://catigoal.com/rest/v1/"
+	if baseURL := os.Getenv("TOURNAMENT_API_URL"); baseURL != "" {
+		cfg.URL = strings.TrimRight(baseURL, "/") + "/"
+	}
 	// If command line arguments are present, use these, else use environment variables
 	if len(os.Args) >= 2 {
 		cfg.TournamentAbbreviation = os.Args[1]

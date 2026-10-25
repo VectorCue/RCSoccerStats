@@ -18,12 +18,13 @@ type API struct {
 	leaguesMu sync.RWMutex
 	Leagues   *data.League
 	Referees  *[]data.RefereeConverted
+	SourceURL string
 }
 
 func Init(cfg *config.Config, url string) {
 	var (
 		addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-		a    = API{}
+		a    = API{SourceURL: url}
 	)
 
 	// Get Data
@@ -93,6 +94,18 @@ func newApp(a *API, frontendDir string) *fiber.App {
 	apiV1.Get("/matches/:league", a.getMatches)
 	apiV1.Get("/referees", a.getReferees)
 	apiV1.Get("/referees/:referee/matches", a.getRefereeMatches)
+	app.Get("/api/v2/:resource", a.getTournamentData)
+
+	// Keep public v2 links short while retaining the existing hash router.
+	for _, view := range []string{"matches", "standings"} {
+		app.Get("/v2/"+view, func(c fiber.Ctx) error {
+			target := "/#/v2/" + view
+			if query := string(c.Request().URI().QueryString()); query != "" {
+				target += "?" + query
+			}
+			return c.Redirect().Status(fiber.StatusFound).To(target)
+		})
+	}
 
 	// Website
 	app.Use("/", static.New(frontendDir))

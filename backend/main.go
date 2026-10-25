@@ -5,6 +5,7 @@ import (
 	"RCJV-SoccerStats/backend/web"
 	"fmt"
 	"log"
+	"net/url"
 )
 
 func main() {
@@ -12,8 +13,8 @@ func main() {
 	log.Println("Starting server...")
 
 	cfg := config.GetConfig()
-	url := fmt.Sprintf("%s%s/", cfg.URL, cfg.TournamentAbbreviation)
+	sourceURL := fmt.Sprintf("%s%s/", cfg.URL, url.PathEscape(cfg.TournamentAbbreviation))
 
 	// Start Webserver
-	web.Init(cfg, url)
+	web.Init(cfg, sourceURL)
 }

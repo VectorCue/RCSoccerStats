@@ -1,0 +1,1127 @@
+openapi: 3.0.3
+info:
+  title: RCJV Game Master public tournament API
+  version: 1.1.0
+  description: |
+    Public, read-only Catigoal-compatible API for tournament screens and RCSoccerStats.
+    Use your Game Master origin plus `/rest/v1/` as the server base. Tournament and
+    league selectors are configured abbreviations, never database IDs.
+
+    **Current Catigoal/RCSoccerStats format is the default:** responses are objects
+    containing tournament metadata and `leagues`, flat `matches`, or one `standings`
+    table. Existing clients can continue requesting `league=ir&league_stage=0`.
+    Adding `format=openapi` selects the older array representation from the supplied
+    Catigoal specification; it is not the format used by the current stats client.
+
+    **Main/sub-league selection:**
+    1. Request `/rest/v1/RCJ2027/leagues` and build the main selector from `main_leagues`.
+       This catalog includes roots and children that have no stages. The existing flat
+       `leagues` array includes only leagues with stages, protecting older clients that
+       assume every entry has `league_stages[0]`.
+    2. Select Soccer with `main_league=soccer`. Its catalog contains Soccer's direct
+       stages and all its sub-leagues; its matches aggregate the root and children.
+    3. Select Infrared with `main_league=soccer&sub_league=ir`, or use the legacy exact
+       selector `league=ir`. `sub_league` requires a child; `league` may name a root or
+       child. If both aliases are supplied they must name the same child.
+    4. Use the selected exact league's complete `league_stages` array for stage indexes.
+       `league_stage=0` means its first stage, ordered by stage sort order then ID; it
+       is neither a database ID nor a Swiss round number. Main-only selection cannot
+       supply a stage index. `/leagues` deliberately ignores `league_stage` so the
+       array indexes remain stable.
+    5. Fetch `/rest/v1/RCJ2027/matches?main_league=soccer&sub_league=ir&league_stage=0`
+       and `/rest/v1/RCJ2027/standings?main_league=soccer&sub_league=ir&league_stage=0`.
+       Standings always require an exact `league` or `sub_league`: a main-only request
+       returns 404 rather than merging unrelated league rankings. Omit `league_stage`
+       for the selected exact league's cumulative seeding table.
+
+    These endpoints require no login, cookie, API key or CSRF header. They send
+    `Access-Control-Allow-Origin: *` and `Cache-Control: no-cache`.
+    Only published match rows are returned. Schedules and empty game slots may be
+    published before results are approved. On this REST compatibility API all
+    unapproved goals and points are integer zero, including live and submitted games;
+    use `status == "approved"` to identify a final result. A zero score alone does not
+    establish a confirmed 0:0. Standings use approved, published results only.
+    This REST API does not expose private notes, checks, signatures or referee user IDs.
+
+    Timestamp strings use `YYYY-MM-DD HH:mm:ss` in `tournament_publishing_timezone`, an
+    IANA timezone. They are not RFC3339 and carry no UTC offset. An unavailable timestamp
+    or pitch is the empty string. Consumers should interpret dates in the supplied
+    timezone; the existing stats frontend's browser-local parsing may differ when the
+    browser uses another timezone. Duration is elapsed `HH:mm:ss`, not a timestamp.
+
+    Version 1.1.0 adds the main-league catalog, hierarchy selectors/metadata and explicit
+    stage type, match status, placeholder and bye flags without removing legacy fields.
+    Examples below are representative fixtures, not a deployed host or live results.
+servers:
+  - url: /rest/v1
+    description: Public API on the same origin as RCJV Game Master.
+security: []
+tags:
+  - name: Discovery
+  - name: Matches
+  - name: Standings
+  - name: Specification
+paths:
+  /openapi.yaml:
+    get:
+      tags: [Specification]
+      operationId: downloadPublicOpenAPI
+      summary: Download this OpenAPI document
+      responses:
+        '200':
+          description: The embedded OpenAPI 3.0.3 YAML document.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/AllowOrigin'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /{tournament_abbrev}/leagues:
+    get:
+      tags: [Discovery]
+      operationId: listPublicLeagues
+      summary: Discover main leagues, sub-leagues and their complete stage lists
+      description: |
+        With no selector, `main_leagues` contains every main league and child, including
+        empty ones; `leagues` is the stage-bearing flat compatibility list. Main-only
+        selection keeps the root and all its children. Exact child selection returns
+        its parent as catalog context with the selected child only and an empty parent
+        `league_stages` array. Exact root selection returns its direct stages and an
+        empty `sub_leagues` array; it does not include children.
+        No filtering is performed by `league_stage` on this endpoint. A configured
+        stage with no approved results remains listed as UNPUBLISHED.
+        `format=openapi` returns only the enriched flat array with stage-name strings;
+        it has no tournament envelope or `main_leagues` catalog.
+      parameters:
+        - $ref: '#/components/parameters/Tournament'
+        - $ref: '#/components/parameters/MainLeague'
+        - $ref: '#/components/parameters/SubLeague'
+        - $ref: '#/components/parameters/League'
+        - $ref: '#/components/parameters/Format'
+      responses:
+        '200':
+          description: Default object envelope, or a legacy array when format=openapi.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/AllowOrigin'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/LeaguesResponse'
+                  - $ref: '#/components/schemas/LegacyLeaguesResponse'
+              examples:
+                default:
+                  $ref: '#/components/examples/Leagues'
+                legacyArray:
+                  $ref: '#/components/examples/LegacyLeagues'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /{tournament_abbrev}/matches:
+    get:
+      tags: [Matches]
+      operationId: listPublicMatches
+      summary: Read published schedules and approved scores
+      description: |
+        No selector returns published matches from all leagues. `main_league=soccer`
+        aggregates Soccer's own matches and every child league. An exact `league` or
+        `sub_league` selects that league only. Add an optional matching main selector
+        to validate membership. A stage index requires an exact league/sub-league.
+        A valid selection with no published games returns an empty matches array.
+
+        Default `matches` is flat. Exact selection adds league and hierarchy metadata
+        to the envelope; main-only selection adds main metadata and null sub metadata.
+        Without selection those envelope keys are absent; every match still carries its
+        own league/hierarchy metadata. `league` inside a match is the display NAME;
+        `league_abbrev` is the abbreviation to send back as a selector.
+
+        `format=openapi` returns an array grouped by exact league and stage, omitting
+        groups with no published games. Group wrappers retain `league_name`,
+        `league_stage_name`, and `matches`, plus additive hierarchy and type fields.
+        It is not a flat array of matches.
+      parameters:
+        - $ref: '#/components/parameters/Tournament'
+        - $ref: '#/components/parameters/MainLeague'
+        - $ref: '#/components/parameters/SubLeague'
+        - $ref: '#/components/parameters/League'
+        - $ref: '#/components/parameters/LeagueStage'
+        - $ref: '#/components/parameters/Format'
+      responses:
+        '200':
+          description: Published matches; unapproved goals and points are zero.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/AllowOrigin'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/MatchesResponse'
+                  - $ref: '#/components/schemas/LegacyMatchesResponse'
+              examples:
+                selectedChild:
+                  $ref: '#/components/examples/Matches'
+                mainOnly:
+                  $ref: '#/components/examples/MainMatches'
+                legacyGroups:
+                  $ref: '#/components/examples/LegacyMatches'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /{tournament_abbrev}/standings:
+    get:
+      tags: [Standings]
+      operationId: readPublicStandings
+      summary: Read one exact league's stage table or cumulative seeding table
+      description: |
+        Supply `league` or `sub_league`; `main_league` alone is invalid (404). An exact
+        root is allowed and ranks only that root's teams. `league_stage` selects a
+        zero-based index in the exact league's catalog; omission or an empty value
+        requests its cumulative Seeding table. Results are never merged across children.
+        Rankings use approved, published paired results: three points for a win, one
+        for a draw, zero for a loss; an automatic bye awards three points. Individual
+        runs and placeholders do not award soccer-table points. Tie breakers are points,
+        goal difference, goals scored, then team ID. Empty/unplayed tables may include
+        registered teams with zero statistics. Qualification is currently UNDEFINED.
+
+        Default response is one Catigoal object envelope. `format=openapi` wraps that
+        same complete object in a single-element array, retaining tournament, exact
+        league and hierarchy metadata. `league_stage_number` is a STRING, including
+        an empty string for Seeding; it is not a JSON integer.
+      parameters:
+        - $ref: '#/components/parameters/Tournament'
+        - $ref: '#/components/parameters/MainLeague'
+        - $ref: '#/components/parameters/SubLeague'
+        - $ref: '#/components/parameters/League'
+        - $ref: '#/components/parameters/LeagueStage'
+        - $ref: '#/components/parameters/Format'
+      responses:
+        '200':
+          description: A single exact-league table, optionally wrapped in a legacy array.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/AllowOrigin'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/StandingsResponse'
+                  - $ref: '#/components/schemas/LegacyStandingsResponse'
+              examples:
+                selectedStage:
+                  $ref: '#/components/examples/Standings'
+                legacyArray:
+                  $ref: '#/components/examples/LegacyStandings'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    Tournament:
+      name: tournament_abbrev
+      in: path
+      required: true
+      description: Configured tournament abbreviation; not a database ID.
+      schema:
+        type: string
+        minLength: 1
+      example: RCJ2027
+    MainLeague:
+      name: main_league
+      in: query
+      description: |
+        Main-league abbreviation, such as soccer. Must identify a root in this tournament.
+        Alone it selects root plus children for discovery/matches. With an exact selector
+        it validates that the selected child/root belongs to this main league. It cannot
+        select an aggregate standings table or provide a main-level stage index.
+      schema:
+        type: string
+      example: soccer
+    SubLeague:
+      name: sub_league
+      in: query
+      description: |
+        Child abbreviation, such as ir. Equivalent to exact `league=ir` for a child;
+        a root is not accepted here. If league is also supplied, both values must name
+        the same child. Required as an alternative to league for standings.
+      schema:
+        type: string
+      example: ir
+    League:
+      name: league
+      in: query
+      description: |
+        Legacy exact league abbreviation, naming either a root or a child. Does not
+        expand a root into its children. If sub_league is also supplied, both must
+        identify the same child. Required as an alternative to sub_league for standings.
+      schema:
+        type: string
+      example: ir
+    LeagueStage:
+      name: league_stage
+      in: query
+      description: |
+        Zero-based index in the selected exact league's full league_stages array
+        (sort_order, then stage ID). Requires league or sub_league; main_league alone
+        is insufficient. Omit/empty means all stages for matches or Seeding for standings.
+        Invalid, negative, noninteger or out-of-range values return 404. This parameter
+        is ignored by the discovery endpoint and is therefore not declared there.
+      allowEmptyValue: true
+      schema:
+        type: integer
+        minimum: 0
+      example: 0
+    Format:
+      name: format
+      in: query
+      description: Omit for current Catigoal object envelopes; openapi selects legacy arrays.
+      schema:
+        type: string
+        enum: [openapi]
+      example: openapi
+  headers:
+    AllowOrigin:
+      description: Readable from browser clients on any origin; no credentials are required.
+      schema:
+        type: string
+        enum: ['*']
+    CacheControl:
+      schema:
+        type: string
+        enum: [no-cache]
+  responses:
+    NotFound:
+      description: |
+        Unknown tournament/selector/stage, mismatched aliases, main/sub membership
+        mismatch, stage index without an exact league, or standings without an exact
+        league. The body is an error object, not the old specification's string array.
+      headers:
+        Access-Control-Allow-Origin:
+          $ref: '#/components/headers/AllowOrigin'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            mainOnlyStandings:
+              value:
+                error: standings require an exact league or sub_league; main_league alone cannot combine rankings
+  schemas:
+    LocalTimestamp:
+      type: string
+      description: Local tournament wall time YYYY-MM-DD HH:mm:ss; empty string when unavailable.
+      pattern: '^$|^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
+      example: '2027-04-03 10:30:00'
+    Duration:
+      type: string
+      description: Elapsed HH:mm:ss. Hours may exceed 23; not a wall-clock timestamp.
+      pattern: '^[0-9]{2,}:[0-5][0-9]:[0-5][0-9]$'
+      example: '00:25:00'
+    PublishingState:
+      type: string
+      enum: [PUBLISHED, UNPUBLISHED]
+      description: PUBLISHED means at least one approved published result exists in this scope.
+    StageType:
+      type: string
+      enum: [round_robin, swiss, knockout, individual, manual]
+    MatchStatus:
+      type: string
+      enum: [draft, scheduled, in_progress, submitted, approved]
+      description: Only approved confirms the REST score. Published pending scores remain zero.
+    TournamentMetadata:
+      type: object
+      required: [tournament_abbrev, tournament_name, tournament_publishing_timezone, tournament_header_type]
+      properties:
+        tournament_abbrev:
+          type: string
+        tournament_name:
+          type: string
+        tournament_publishing_timezone:
+          type: string
+          description: IANA timezone used for every compatibility timestamp.
+          example: Europe/Berlin
+        tournament_header_type:
+          type: string
+          enum: [TITLE]
+    HierarchyMetadata:
+      type: object
+      required: [main_league_abbrev, main_league_name, sub_league_abbrev, sub_league_name]
+      properties:
+        main_league_abbrev:
+          type: string
+        main_league_name:
+          type: string
+        sub_league_abbrev:
+          type: string
+          nullable: true
+          description: Null for a root/main-only selection; child's abbreviation for a child.
+        sub_league_name:
+          type: string
+          nullable: true
+    SelectionMetadata:
+      type: object
+      description: |
+        Optional envelope keys: exact selection includes league and hierarchy keys;
+        main-only selection includes hierarchy keys with null sub values; no selection
+        omits these keys. Stage keys appear only when a stage index was supplied.
+      properties:
+        league_abbrev:
+          type: string
+        league_name:
+          type: string
+        main_league_abbrev:
+          type: string
+        main_league_name:
+          type: string
+        sub_league_abbrev:
+          type: string
+          nullable: true
+        sub_league_name:
+          type: string
+          nullable: true
+        league_stage_number:
+          type: string
+          description: Original index query string, such as "0"; never a JSON number.
+        league_stage_name:
+          type: string
+    StagePublishing:
+      type: object
+      required: [name, standings_publishing_state, standings_last_published]
+      properties:
+        name:
+          type: string
+        standings_publishing_state:
+          $ref: '#/components/schemas/PublishingState'
+        standings_last_published:
+          $ref: '#/components/schemas/LocalTimestamp'
+    LeagueIdentity:
+      allOf:
+        - $ref: '#/components/schemas/HierarchyMetadata'
+        - type: object
+          required: [id, parent_id, abbrev, name]
+          properties:
+            id:
+              type: integer
+              minimum: 1
+            parent_id:
+              type: integer
+              minimum: 1
+              nullable: true
+              description: Parent database ID for hierarchy association only; null for a root.
+            abbrev:
+              type: string
+            name:
+              type: string
+    League:
+      allOf:
+        - $ref: '#/components/schemas/LeagueIdentity'
+        - type: object
+          required: [league_stages, seeding_publishing_state, seeding_last_published]
+          properties:
+            league_stages:
+              type: array
+              description: Full, stable stage-order array; empty only in the hierarchy catalog.
+              items:
+                $ref: '#/components/schemas/StagePublishing'
+            seeding_publishing_state:
+              $ref: '#/components/schemas/PublishingState'
+            seeding_last_published:
+              $ref: '#/components/schemas/LocalTimestamp'
+    LegacyLeague:
+      allOf:
+        - $ref: '#/components/schemas/LeagueIdentity'
+        - type: object
+          required: [league_stages]
+          properties:
+            league_stages:
+              type: array
+              minItems: 1
+              description: Stage-name STRINGS in format=openapi; indexes match the default array.
+              items:
+                type: string
+    MainLeague:
+      type: object
+      required: [id, abbrev, name, league_stages, sub_leagues]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        abbrev:
+          type: string
+        name:
+          type: string
+        league_stages:
+          type: array
+          description: Root's own stages; empty when an exact child is selected.
+          items:
+            $ref: '#/components/schemas/StagePublishing'
+        sub_leagues:
+          type: array
+          description: Children including empty ones; empty on exact-root selection.
+          items:
+            $ref: '#/components/schemas/League'
+    LeaguesResponse:
+      allOf:
+        - $ref: '#/components/schemas/TournamentMetadata'
+        - $ref: '#/components/schemas/SelectionMetadata'
+        - type: object
+          required: [leagues, main_leagues]
+          properties:
+            leagues:
+              type: array
+              description: Flat compatibility list of stage-bearing exact leagues only.
+              items:
+                $ref: '#/components/schemas/League'
+            main_leagues:
+              type: array
+              items:
+                $ref: '#/components/schemas/MainLeague'
+    LegacyLeaguesResponse:
+      type: array
+      items:
+        $ref: '#/components/schemas/LegacyLeague'
+    Team:
+      type: object
+      required: [name, affiliation, startnumber, external_key]
+      properties:
+        id:
+          type: integer
+          minimum: 0
+          description: Real team ID or 0 for an empty slot; omitted on the synthetic BYE team.
+        name:
+          type: string
+        affiliation:
+          type: string
+        startnumber:
+          type: integer
+          minimum: 0
+        external_key:
+          type: string
+    NullableTeam:
+      type: object
+      nullable: true
+      description: Same team shape; null for a populated individual run or other non-bye solo match.
+      required: [name, affiliation, startnumber, external_key]
+      properties:
+        id:
+          type: integer
+          minimum: 0
+        name:
+          type: string
+        affiliation:
+          type: string
+        startnumber:
+          type: integer
+          minimum: 0
+        external_key:
+          type: string
+    Referee:
+      type: object
+      required: [first_name, last_name]
+      properties:
+        first_name:
+          type: string
+        last_name:
+          type: string
+    Match:
+      allOf:
+        - $ref: '#/components/schemas/HierarchyMetadata'
+        - type: object
+          required: [number, team1, team2, league, league_abbrev, league_stage, stage_type, is_placeholder, is_bye, status, group_name, start, duration, pitch, goals1, goals2, points1, points2, referees, last_published]
+          properties:
+            number:
+              type: integer
+              minimum: 1
+              description: Tournament match number; may contain gaps after draws are changed.
+            team1:
+              $ref: '#/components/schemas/Team'
+            team2:
+              $ref: '#/components/schemas/NullableTeam'
+            league:
+              type: string
+              description: Exact league display NAME; use league_abbrev for requests.
+            league_abbrev:
+              type: string
+            league_stage:
+              type: string
+              description: Stage display name, not its index or database ID.
+            stage_type:
+              $ref: '#/components/schemas/StageType'
+            is_placeholder:
+              type: boolean
+              description: |
+                Reserved game awaiting team assignments. Both team objects currently
+                use id 0, name "Awaiting teams", empty affiliation/external_key and
+                startnumber 0, including an unpopulated individual slot.
+            is_bye:
+              type: boolean
+              description: True only for an automatic bye; team2 is the synthetic BYE object.
+            status:
+              $ref: '#/components/schemas/MatchStatus'
+            group_name:
+              type: string
+              enum: [Group 1]
+            start:
+              $ref: '#/components/schemas/LocalTimestamp'
+            duration:
+              $ref: '#/components/schemas/Duration'
+            pitch:
+              type: string
+              description: Field name, or empty string when unscheduled/unassigned.
+            goals1:
+              type: integer
+              minimum: 0
+              description: Approved score only; zero for every unapproved status.
+            goals2:
+              type: integer
+              minimum: 0
+            points1:
+              type: integer
+              minimum: 0
+              description: Approved paired-game points or 3 for a bye; 0 for individual/pending games.
+            points2:
+              type: integer
+              minimum: 0
+            referees:
+              type: array
+              description: Assigned referees as an ARRAY, empty when none are assigned.
+              items:
+                $ref: '#/components/schemas/Referee'
+            last_published:
+              $ref: '#/components/schemas/LocalTimestamp'
+      description: |
+        One published row. `last_published` contains its latest match update time in the
+        tournament timezone; it is a compatibility field, not an immutable publication log.
+        Published slots may be draft/scheduled/in_progress/submitted as well as approved.
+    MatchesResponse:
+      allOf:
+        - $ref: '#/components/schemas/TournamentMetadata'
+        - $ref: '#/components/schemas/SelectionMetadata'
+        - type: object
+          required: [matches]
+          properties:
+            matches:
+              type: array
+              items:
+                $ref: '#/components/schemas/Match'
+    MatchesGroup:
+      allOf:
+        - $ref: '#/components/schemas/HierarchyMetadata'
+        - type: object
+          required: [league_abbrev, league_name, league_stage_name, stage_type, matches]
+          properties:
+            league_abbrev:
+              type: string
+            league_name:
+              type: string
+            league_stage_name:
+              type: string
+            stage_type:
+              $ref: '#/components/schemas/StageType'
+            matches:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/Match'
+    LegacyMatchesResponse:
+      type: array
+      description: Nonempty per-league/per-stage group wrappers, not a flat Match array.
+      items:
+        $ref: '#/components/schemas/MatchesGroup'
+    StandingsEntry:
+      type: object
+      required: [team, group, wins, draws, losses, points, scored, conceded, difference, rank, qualification, last_published]
+      properties:
+        team:
+          $ref: '#/components/schemas/Team'
+        group:
+          type: integer
+          enum: [1]
+        wins:
+          type: integer
+          minimum: 0
+        draws:
+          type: integer
+          minimum: 0
+        losses:
+          type: integer
+          minimum: 0
+        points:
+          type: integer
+          minimum: 0
+        scored:
+          type: integer
+          minimum: 0
+        conceded:
+          type: integer
+          minimum: 0
+        difference:
+          type: integer
+        rank:
+          type: integer
+          minimum: 1
+        qualification:
+          type: string
+          enum: [UNDEFINED]
+        last_published:
+          $ref: '#/components/schemas/LocalTimestamp'
+    StandingsResponse:
+      allOf:
+        - $ref: '#/components/schemas/TournamentMetadata'
+        - $ref: '#/components/schemas/HierarchyMetadata'
+        - type: object
+          required: [league_abbrev, league_name, league_stage_number, league_stage_name, last_published, standings]
+          properties:
+            league_abbrev:
+              type: string
+            league_name:
+              type: string
+            league_stage_number:
+              type: string
+              description: Original zero-based index string, or empty string for Seeding.
+              example: '0'
+            league_stage_name:
+              type: string
+              description: Selected stage name or Seeding when no stage was selected.
+            last_published:
+              $ref: '#/components/schemas/LocalTimestamp'
+            standings:
+              type: array
+              items:
+                $ref: '#/components/schemas/StandingsEntry'
+    LegacyStandingsResponse:
+      type: array
+      minItems: 1
+      maxItems: 1
+      description: The same complete StandingsResponse object in a single-element array.
+      items:
+        $ref: '#/components/schemas/StandingsResponse'
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+  examples:
+    Leagues:
+      summary: "Default discovery includes Soccer, Infrared and an empty Vision sub-league"
+      description: "GET /rest/v1/RCJ2027/leagues. Vision is in the hierarchy catalog but not the flat list until it has a stage."
+      value:
+        tournament_abbrev: "RCJ2027"
+        tournament_name: "RoboCup Junior 2027"
+        tournament_publishing_timezone: "Europe/Berlin"
+        tournament_header_type: "TITLE"
+        leagues:
+          -
+            id: 2
+            parent_id: 1
+            abbrev: "ir"
+            name: "Infrared"
+            main_league_abbrev: "soccer"
+            main_league_name: "Soccer"
+            sub_league_abbrev: "ir"
+            sub_league_name: "Infrared"
+            league_stages:
+              -
+                name: "Round robin 1"
+                standings_publishing_state: "PUBLISHED"
+                standings_last_published: "2027-04-03 10:30:00"
+            seeding_publishing_state: "PUBLISHED"
+            seeding_last_published: "2027-04-03 10:30:00"
+        main_leagues:
+          -
+            id: 1
+            abbrev: "soccer"
+            name: "Soccer"
+            league_stages: []
+            sub_leagues:
+              -
+                id: 2
+                parent_id: 1
+                abbrev: "ir"
+                name: "Infrared"
+                main_league_abbrev: "soccer"
+                main_league_name: "Soccer"
+                sub_league_abbrev: "ir"
+                sub_league_name: "Infrared"
+                league_stages:
+                  -
+                    name: "Round robin 1"
+                    standings_publishing_state: "PUBLISHED"
+                    standings_last_published: "2027-04-03 10:30:00"
+                seeding_publishing_state: "PUBLISHED"
+                seeding_last_published: "2027-04-03 10:30:00"
+              -
+                id: 3
+                parent_id: 1
+                abbrev: "vision"
+                name: "Vision"
+                main_league_abbrev: "soccer"
+                main_league_name: "Soccer"
+                sub_league_abbrev: "vision"
+                sub_league_name: "Vision"
+                league_stages: []
+                seeding_publishing_state: "UNPUBLISHED"
+                seeding_last_published: ""
+    LegacyLeagues:
+      summary: "Legacy flat array with stage-name strings"
+      description: "GET /rest/v1/RCJ2027/leagues?main_league=soccer&format=openapi"
+      value:
+        -
+          id: 2
+          parent_id: 1
+          abbrev: "ir"
+          name: "Infrared"
+          main_league_abbrev: "soccer"
+          main_league_name: "Soccer"
+          sub_league_abbrev: "ir"
+          sub_league_name: "Infrared"
+          league_stages:
+            - "Round robin 1"
+    Matches:
+      summary: "Exact-child object response with an approved score"
+      description: "GET /rest/v1/RCJ2027/matches?main_league=soccer&sub_league=ir&league_stage=0. Legacy league=ir selects the same table."
+      value:
+        tournament_abbrev: "RCJ2027"
+        tournament_name: "RoboCup Junior 2027"
+        tournament_publishing_timezone: "Europe/Berlin"
+        tournament_header_type: "TITLE"
+        league_abbrev: "ir"
+        league_name: "Infrared"
+        main_league_abbrev: "soccer"
+        main_league_name: "Soccer"
+        sub_league_abbrev: "ir"
+        sub_league_name: "Infrared"
+        league_stage_number: "0"
+        league_stage_name: "Round robin 1"
+        matches:
+          -
+            number: 1
+            team1:
+              id: 11
+              name: "Bodensee Koalas"
+              affiliation: "Germany"
+              startnumber: 1
+              external_key: "koalas"
+            team2:
+              id: 12
+              name: "Prototype Forever"
+              affiliation: "Germany"
+              startnumber: 2
+              external_key: "prototype"
+            league: "Infrared"
+            league_abbrev: "ir"
+            main_league_abbrev: "soccer"
+            main_league_name: "Soccer"
+            sub_league_abbrev: "ir"
+            sub_league_name: "Infrared"
+            league_stage: "Round robin 1"
+            stage_type: "round_robin"
+            is_placeholder: false
+            is_bye: false
+            status: "approved"
+            group_name: "Group 1"
+            start: "2027-04-03 10:00:00"
+            duration: "00:25:00"
+            pitch: "B1"
+            goals1: 2
+            goals2: 1
+            points1: 3
+            points2: 0
+            referees:
+              -
+                first_name: "Alex"
+                last_name: "Example"
+            last_published: "2027-04-03 10:30:00"
+    MainMatches:
+      summary: "Main-only envelope aggregates root and children"
+      description: "GET /rest/v1/RCJ2027/matches?main_league=soccer. Envelope sub fields are null; each match identifies its own child."
+      value:
+        tournament_abbrev: "RCJ2027"
+        tournament_name: "RoboCup Junior 2027"
+        tournament_publishing_timezone: "Europe/Berlin"
+        tournament_header_type: "TITLE"
+        main_league_abbrev: "soccer"
+        main_league_name: "Soccer"
+        sub_league_abbrev: null
+        sub_league_name: null
+        matches:
+          -
+            number: 1
+            team1:
+              id: 11
+              name: "Bodensee Koalas"
+              affiliation: "Germany"
+              startnumber: 1
+              external_key: "koalas"
+            team2:
+              id: 12
+              name: "Prototype Forever"
+              affiliation: "Germany"
+              startnumber: 2
+              external_key: "prototype"
+            league: "Infrared"
+            league_abbrev: "ir"
+            main_league_abbrev: "soccer"
+            main_league_name: "Soccer"
+            sub_league_abbrev: "ir"
+            sub_league_name: "Infrared"
+            league_stage: "Round robin 1"
+            stage_type: "round_robin"
+            is_placeholder: false
+            is_bye: false
+            status: "approved"
+            group_name: "Group 1"
+            start: "2027-04-03 10:00:00"
+            duration: "00:25:00"
+            pitch: "B1"
+            goals1: 2
+            goals2: 1
+            points1: 3
+            points2: 0
+            referees:
+              -
+                first_name: "Alex"
+                last_name: "Example"
+            last_published: "2027-04-03 10:30:00"
+    LegacyMatches:
+      summary: "Legacy arrays retain league/stage group wrappers"
+      description: "GET /rest/v1/RCJ2027/matches?league=ir&league_stage=0&format=openapi"
+      value:
+        -
+          league_abbrev: "ir"
+          league_name: "Infrared"
+          main_league_abbrev: "soccer"
+          main_league_name: "Soccer"
+          sub_league_abbrev: "ir"
+          sub_league_name: "Infrared"
+          league_stage_name: "Round robin 1"
+          stage_type: "round_robin"
+          matches:
+            -
+              number: 1
+              team1:
+                id: 11
+                name: "Bodensee Koalas"
+                affiliation: "Germany"
+                startnumber: 1
+                external_key: "koalas"
+              team2:
+                id: 12
+                name: "Prototype Forever"
+                affiliation: "Germany"
+                startnumber: 2
+                external_key: "prototype"
+              league: "Infrared"
+              league_abbrev: "ir"
+              main_league_abbrev: "soccer"
+              main_league_name: "Soccer"
+              sub_league_abbrev: "ir"
+              sub_league_name: "Infrared"
+              league_stage: "Round robin 1"
+              stage_type: "round_robin"
+              is_placeholder: false
+              is_bye: false
+              status: "approved"
+              group_name: "Group 1"
+              start: "2027-04-03 10:00:00"
+              duration: "00:25:00"
+              pitch: "B1"
+              goals1: 2
+              goals2: 1
+              points1: 3
+              points2: 0
+              referees:
+                -
+                  first_name: "Alex"
+                  last_name: "Example"
+              last_published: "2027-04-03 10:30:00"
+    IndividualMatch:
+      summary: "Individual run with no opponent or bye award"
+      description: "A match entry after a Runs stage is added to Vision. team2 is null; points stay zero after approval."
+      value:
+        number: 8
+        team1:
+          id: 21
+          name: "Vision Team"
+          affiliation: "Example School"
+          startnumber: 1
+          external_key: "vision-team"
+        team2: null
+        league: "Vision"
+        league_abbrev: "vision"
+        main_league_abbrev: "soccer"
+        main_league_name: "Soccer"
+        sub_league_abbrev: "vision"
+        sub_league_name: "Vision"
+        league_stage: "Runs"
+        stage_type: "individual"
+        is_placeholder: false
+        is_bye: false
+        status: "approved"
+        group_name: "Group 1"
+        start: "2027-04-03 11:00:00"
+        duration: "00:10:00"
+        pitch: "V1"
+        goals1: 42
+        goals2: 0
+        points1: 0
+        points2: 0
+        referees: []
+        last_published: "2027-04-03 11:15:00"
+    PlaceholderMatch:
+      summary: "Published reserved game awaiting team assignments"
+      description: "A schedule row, not a confirmed 0:0. Check is_placeholder and status before displaying a score."
+      value:
+        number: 9
+        team1:
+          id: 0
+          name: "Awaiting teams"
+          affiliation: ""
+          startnumber: 0
+          external_key: ""
+        team2:
+          id: 0
+          name: "Awaiting teams"
+          affiliation: ""
+          startnumber: 0
+          external_key: ""
+        league: "Infrared"
+        league_abbrev: "ir"
+        main_league_abbrev: "soccer"
+        main_league_name: "Soccer"
+        sub_league_abbrev: "ir"
+        sub_league_name: "Infrared"
+        league_stage: "Round robin 1"
+        stage_type: "round_robin"
+        is_placeholder: true
+        is_bye: false
+        status: "scheduled"
+        group_name: "Group 1"
+        start: "2027-04-03 11:00:00"
+        duration: "00:25:00"
+        pitch: "B1"
+        goals1: 0
+        goals2: 0
+        points1: 0
+        points2: 0
+        referees: []
+        last_published: "2027-04-03 09:00:00"
+    Standings:
+      summary: "Exact-child stage standings object"
+      description: "GET /rest/v1/RCJ2027/standings?main_league=soccer&sub_league=ir&league_stage=0. Omit league_stage for an empty league_stage_number and league_stage_name Seeding."
+      value:
+        tournament_abbrev: "RCJ2027"
+        tournament_name: "RoboCup Junior 2027"
+        tournament_publishing_timezone: "Europe/Berlin"
+        tournament_header_type: "TITLE"
+        league_abbrev: "ir"
+        league_name: "Infrared"
+        main_league_abbrev: "soccer"
+        main_league_name: "Soccer"
+        sub_league_abbrev: "ir"
+        sub_league_name: "Infrared"
+        league_stage_number: "0"
+        league_stage_name: "Round robin 1"
+        last_published: "2027-04-03 10:30:00"
+        standings:
+          -
+            team:
+              id: 11
+              name: "Bodensee Koalas"
+              affiliation: "Germany"
+              startnumber: 1
+              external_key: "koalas"
+            group: 1
+            wins: 1
+            draws: 0
+            losses: 0
+            points: 3
+            scored: 2
+            conceded: 1
+            difference: 1
+            rank: 1
+            qualification: "UNDEFINED"
+            last_published: "2027-04-03 10:30:00"
+          -
+            team:
+              id: 12
+              name: "Prototype Forever"
+              affiliation: "Germany"
+              startnumber: 2
+              external_key: "prototype"
+            group: 1
+            wins: 0
+            draws: 0
+            losses: 1
+            points: 0
+            scored: 1
+            conceded: 2
+            difference: -1
+            rank: 2
+            qualification: "UNDEFINED"
+            last_published: "2027-04-03 10:30:00"
+    LegacyStandings:
+      summary: "One complete standings envelope in a single-element array"
+      description: "GET /rest/v1/RCJ2027/standings?league=ir&league_stage=0&format=openapi"
+      value:
+        -
+          tournament_abbrev: "RCJ2027"
+          tournament_name: "RoboCup Junior 2027"
+          tournament_publishing_timezone: "Europe/Berlin"
+          tournament_header_type: "TITLE"
+          league_abbrev: "ir"
+          league_name: "Infrared"
+          main_league_abbrev: "soccer"
+          main_league_name: "Soccer"
+          sub_league_abbrev: "ir"
+          sub_league_name: "Infrared"
+          league_stage_number: "0"
+          league_stage_name: "Round robin 1"
+          last_published: "2027-04-03 10:30:00"
+          standings:
+            -
+              team:
+                id: 11
+                name: "Bodensee Koalas"
+                affiliation: "Germany"
+                startnumber: 1
+                external_key: "koalas"
+              group: 1
+              wins: 1
+              draws: 0
+              losses: 0
+              points: 3
+              scored: 2
+              conceded: 1
+              difference: 1
+              rank: 1
+              qualification: "UNDEFINED"
+              last_published: "2027-04-03 10:30:00"
+            -
+              team:
+                id: 12
+                name: "Prototype Forever"
+                affiliation: "Germany"
+                startnumber: 2
+                external_key: "prototype"
+              group: 1
+              wins: 0
+              draws: 0
+              losses: 1
+              points: 0
+              scored: 1
+              conceded: 2
+              difference: -1
+              rank: 2
+              qualification: "UNDEFINED"
+              last_published: "2027-04-03 10:30:00"
